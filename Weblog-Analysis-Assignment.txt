@@ -1,0 +1,120 @@
+import org.apache.log4j.{Level, Logger}
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.functions._
+
+Logger.getLogger("org").setLevel(Level.OFF)
+val spark = SparkSession.builder().appName("WebLog").master("local[*]").getOrCreate()
+
+import spark.implicits._
+
+val logs_DF = spark.read.option("header","true")text("dbfs:/FileStore/shared_uploads/kottanarendra9@gmail.com/Weblog_6.csv")
+val header = logs_DF.first() // Extract Header
+val logs_DF1 = logs_DF.filter(row => row != header)
+logs_DF1.printSchema()
+
+logs_DF1.show(5, false)
+
+// a) Parsing the Log Files using RegExp &amp; Pre-process Raw Log Data into Data frame with attributes.
+val hosts = logs_DF1.select (regexp_extract ($"value","""([^(\s|,)]+)""", 1).alias("host"))
+hosts.show()
+
+logs_DF1.select(regexp_extract($"value", """\S(\d{2}/\w{3}/\d{4}:\d{2}:\d{2}:\d{2})""",1).alias("Timestamp")).show(false)
+
+logs_DF1.select(regexp_extract($"value", """\S(\S+)\s(\S+)\s*(\S*)""", 2).alias("url")).show(false)
+
+logs_DF1.select(regexp_extract($"value", """\S(\w+)\s(\S*)""", 1).alias("Method")).show(false)
+
+logs_DF1.select(regexp_extract($"value", """(\S+)\s(\S+)\s(\S+)(,)""", 3).alias("HTTP protocol")).show()
+
+logs_DF1.select(regexp_extract($"value", """,(\d{3})""", 1).cast("int").alias("Status")).show(false)
+
+val log_df =  logs_DF1.select (regexp_extract ($"value","""([^(\s|,)]+)""", 1).alias("host"),
+                 regexp_extract($"value", """\S(\d{2}/\w{3}/\d{4}:\d{2}:\d{2}:\d{2})""",1).alias("Timestamp"),
+                 regexp_extract($"value", """\S(\S+)\s(\S+)\s*(\S*)""", 2).alias("url"),
+                 regexp_extract($"value", """\S(\w+)\s(\S*)""", 1).alias("Method"),
+                 regexp_extract($"value", """(\S+)\s(\S+)\s(\S+)(,)""", 3).alias("HTTP protocol"),
+                 regexp_extract($"value", """,(\d{3})""", 1).alias("Status"))
+
+ log_df.printSchema()       
+log_df.show()
+
+// b. Find Count of Null, None, NaN of all dataframe columns
+import org.apache.spark.sql.functions.{col,when,count}
+import org.apache.spark.sql.Column
+// UDF
+def countNullCols (columns:Array[String]):Array[Column] = {
+   columns.map(c => {
+   count(when(col(c).isNull, c)).alias(c)
+  })
+}
+
+log_df.select(countNullCols(log_df.columns): _*).show()
+
+// Convert Textfile Format to Parquet File Format
+log_df.write.parquet("dbfs:/FileStore/shared_uploads/kottanarendra9@gmail.com/Weblog_6/")
+
+val parquetLogs = spark.read.parquet("dbfs:/FileStore/shared_uploads/kottanarendra9@gmail.com/Weblog_6/")
+parquetLogs.show()
+
+import org.apache.spark.storage.StorageLevel
+val parquetLogsDF = parquetLogs.persist(StorageLevel.MEMORY_AND_DISK)
+
+// c. Pre-process and fix timestamp month name to month value. Convert Datetime (timestamp column) as Days, Month & Year.
+val month_map = Map("Jan" -> 1, "Feb" -> 2, "Mar" -> 3, "Apr" -> 4, "May" -> 5, "Jun" -> 6, "Jul" -> 7, "Aug" -> 8, "Sep" -> 9,
+                   "Oct" -> 10, "Nov" -> 11, "Dec" -> 12)
+// UDF 
+def parse_time(s : String):String = {
+  "%3$s-%2$s-%1$s %4$s:%5$s:%6$s".format(s.substring(0,2), month_map(s.substring(3,6)), s.substring(7,11), 
+                                             s.substring(12,14), s.substring(15,17), s.substring(18))
+}
+
+val toTimestamp = udf[String, String](parse_time(_))
+
+val parquetlogsDF = parquetLogs.select($"*", to_timestamp(toTimestamp($"Timestamp")).alias("time")).drop("Timestamp")
+parquetlogsDF.show(false)
+
+// e. Show the summary of each column. 
+parquetlogsDF.describe(cols = "Status").show()            
+
+val daily_hosts = parquetlogsDF.withColumn("day",dayofyear($"time")).withColumn("month",month($"time")).withColumn("year",year($"time"))                   
+daily_hosts.show(5)
+
+// f. Display frequency of 200 status code in the response for each month.
+daily_hosts.filter($"Status" === 200).groupBy("month").count().sort(desc("count")).show(false)
+
+// g. Frequency of Host Visits in November Month.
+
+%sql
+spark.sql("select host,month, count(*) as Count from weblogsTableone where Status = 404 group by host,month").show()
+
+// h. Display Top 15 Error Paths - status != 200.
+parquetLogs.filter($"Status" =!= 200).groupBy("url").count().sort(desc("count")).show(15)
+
+// i. Display Top 10 Paths with Error - with status equals 200.
+parquetLogs.filter($"Status" === 200).groupBy("URL").count().sort(desc("count")).show(10)
+
+// j. Exploring 404 status code. Listing 404 status Code Records. List Top 20 Host with 404 response status code (Query + Visualization).
+
+%sql
+select host, count(*) as Count from welogsTable where Status = group by host order by Count Desc limit 20 
+
+// k. Display the List of 404 Error Response Status Code per Day (Query + Visualization).
+%sql
+select day, count(*) as Count from weblogsTable where Status = 404 group by order by
+
+// l. List Top 20 Paths (Endpoint) with 404 Response Status Code.
+spark.sql("select url from weblogsTable where Status = 404").show(false)
+
+// m. Find the number of unique source IPs that have made requests to the webserver for each month.
+spark.sql("select distinct(url) from weblogsTable where Status = 404").show(false)
+
+// p. Query to Display Distinct Path responding 404 in status error.
+spark.sql("select distinct(url) from weblogsTable where Status = 404").show(false)
+
+
+
+
+
+
+
+
